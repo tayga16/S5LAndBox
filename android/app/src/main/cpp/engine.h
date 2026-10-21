@@ -120,6 +120,7 @@ bool engine_touch(engine_t *engine, double x, double y,
                   double view_w, double view_h, int phase);
 bool engine_button(engine_t *engine, unsigned app_button, bool pressed);
 bool engine_button_pressed(engine_t *engine, unsigned app_button);
+bool engine_is_display_running(engine_t *engine);
 
 /* -------------------------------------------------------------- snapshots */
 int engine_snapshots_json(engine_t *engine, const char *id,

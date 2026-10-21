@@ -848,24 +848,54 @@ static void load_instances(engine_t *e)
     int fd;
     vm_instance_list_reset(&e->instances);
     if (!join_path(path, sizeof path, e->machines, "instances.txt")) return;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-        st.st_size > 1024 * 1024)
-        return;
-    text = malloc((size_t)st.st_size + 1u);
-    if (!text) return;
-    fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-        ssize_t got = read(fd, text, (size_t)st.st_size);
-        close(fd);
-        if (got == (ssize_t)st.st_size) {
-            text[got] = '\0';
-            if (vm_instance_deserialize(&e->instances, text) != VM_INSTANCE_OK) {
-                ENGINE_WARN("instances.txt could not be parsed; starting empty");
-                vm_instance_list_reset(&e->instances);
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+        st.st_size <= 1024 * 1024) {
+        text = malloc((size_t)st.st_size + 1u);
+        if (text) {
+            fd = open(path, O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                ssize_t got = read(fd, text, (size_t)st.st_size);
+                close(fd);
+                if (got > 0) {
+                    text[got] = '\0';
+                    if (vm_instance_deserialize(&e->instances, text) != VM_INSTANCE_OK) {
+                        ENGINE_WARN("instances.txt could not be parsed; starting empty");
+                        vm_instance_list_reset(&e->instances);
+                    }
+                }
             }
+            free(text);
         }
     }
-    free(text);
+
+    /* Auto-discover existing machines on disk that may not be in instances.txt */
+    DIR *d = opendir(e->machines);
+    if (d) {
+        struct dirent *ent;
+        bool changed = false;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            if (strlen(ent->d_name) == VM_INSTANCE_ID_LEN &&
+                vm_instance_id_check(ent->d_name) == VM_INSTANCE_OK &&
+                vm_instance_index_of_id(&e->instances, ent->d_name) < 0) {
+                char mname[VM_INSTANCE_NAME_MAX + 1u];
+                snprintf(mname, sizeof mname, "iPhone 3G (%.4s)", ent->d_name);
+                bool opts[VM_INSTANCE_OPTION_MAX];
+                for (unsigned o = 0; o < VM_INSTANCE_OPTION_MAX; o++) {
+                    opts[o] = vm_option_new_machine_value(o, false, false);
+                }
+                unsigned idx = 0;
+                if (vm_instance_add(&e->instances, ent->d_name, mname, opts,
+                                    VM_INSTANCE_OPTION_MAX, engine_unix_now(), &idx) == VM_INSTANCE_OK) {
+                    changed = true;
+                }
+            }
+        }
+        closedir(d);
+        if (changed) {
+            persist_instances_locked(e);
+        }
+    }
 }
 
 static int instance_index_locked(engine_t *e, const char *id)
@@ -2757,6 +2787,7 @@ engine_t *engine_create(const char *root_directory)
     e->phase = PHASE_IDLE;
     snprintf(e->status, sizeof e->status, "idle");
     snprintf(e->mode, sizeof e->mode, "not started");
+    web_log_server_set_engine(e);
     web_log_server_start(8080);
     return e;
 }
@@ -3138,6 +3169,15 @@ bool engine_button_pressed(engine_t *engine, unsigned app_button)
     pressed = engine->buttons[app_button];
     pthread_mutex_unlock(&engine->lock);
     return pressed;
+}
+
+bool engine_is_display_running(engine_t *engine)
+{
+    if (!engine) return false;
+    pthread_mutex_lock(&engine->lock);
+    bool running = engine->have_frame && !engine->snapshot_blank;
+    pthread_mutex_unlock(&engine->lock);
+    return running;
 }
 
 /* -------------------------------------------------------------- snapshots --- */
